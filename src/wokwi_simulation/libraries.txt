@@ -1,0 +1,5 @@
+MFRC522
+Adafruit SH110X
+Adafruit GFX Library
+ESP32Servo
+Keypad

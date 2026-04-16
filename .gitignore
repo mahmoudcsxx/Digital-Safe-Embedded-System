@@ -1,0 +1,27 @@
+# Build artifacts
+build/
+*.o
+*.d
+*.elf
+*.bin
+*.map
+*.hex
+
+# Arduino IDE
+*.ino.cpp
+*.ino.hex
+
+# OS files
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Compiled libraries
+libraries/
