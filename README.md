@@ -252,6 +252,8 @@ Open `hardware/3d_model/DigitalSafe_Maquette.scad` in [OpenSCAD](https://opensca
 | Zeina Alaaeldin | 254588 | zeina254588@bue.edu.eg |
 | Zainab Sabit | 257156 | zainab257156@bue.edu.eg |
 | Mahmoud Samir | 257678 | mahmoud257678@bue.edu.eg |
+| Sondos Alaaeldin | 250362 | sondos250362@bue.edu.eg |
+| Youssef Hassan | 257745 | youssef250498@bue.edu.eg |
 | Ziad Youssef | 257745 | ziad257745@bue.edu.eg |
 
 ## 📄 License
@@ -259,7 +261,3 @@ Open `hardware/3d_model/DigitalSafe_Maquette.scad` in [OpenSCAD](https://opensca
 This project is developed for academic purposes as part of the 25CSCI11C course at BUE.
 
 ---
-
-<p align="center">
-  <sub>Built with ❤️ for Introduction to Embedded Systems — BUE 2026</sub>
-</p>
