@@ -235,8 +235,6 @@ The safe enclosure is designed in [https://tinkercad.com/](https://www.tinkercad
 
 **Print Settings:** PLA, 0.2mm layer height, 20% infill, no supports needed.
 
-Open `hardware/3d_model/DigitalSafe_Maquette.scad` in [OpenSCAD](https://openscad.org), render (F6), and export each part as STL.
-
 ## 👥 Team
 
 **Project A1401 — British University in Egypt — 2025/2026**
