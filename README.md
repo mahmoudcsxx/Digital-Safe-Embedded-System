@@ -67,31 +67,31 @@ The system supports **three authentication methods**: keypad password, RFID card
 
 ```
 ESP32-S3 DevKitC-1
-┌─────────────────────────────┐
-│                             │
-│  GPIO 8  ──── OLED SDA      │
-│  GPIO 9  ──── OLED SCL      │
-│  3V3     ──── OLED VCC      │
-│                             │
-│  GPIO 10 ──── RFID SDA(SS)  │
-│  GPIO 14 ──── RFID RST      │
-│  GPIO 12 ──── RFID SCK      │
-│  GPIO 11 ──── RFID MOSI     │
-│  GPIO 13 ──── RFID MISO     │
-│  3V3     ──── RFID 3.3V     │
-│                             │
-│  GPIO 18 ──── Servo Signal   │
-│  5V(VIN) ──── Servo VCC     │
-│                             │
+┌──────────────────────────────────┐
+│                                  │
+│  GPIO 8  ──── OLED SDA           │
+│  GPIO 9  ──── OLED SCL           │
+│  3V3     ──── OLED VCC           │
+│                                  │
+│  GPIO 10 ──── RFID SDA(SS)       │
+│  GPIO 14 ──── RFID RST           │
+│  GPIO 12 ──── RFID SCK           │
+│  GPIO 11 ──── RFID MOSI          │ 
+│  GPIO 13 ──── RFID MISO          │
+│  3V3     ──── RFID 3.3V          │
+│                                  │
+│  GPIO 18 ──── Servo Signal       │
+│  5V(VIN) ──── Servo VCC          │
+│                                  │
 │  GPIO 15 ─┬── 220Ω ── Red LED    │
 │  GPIO 16 ─┬── 220Ω ── Green LED  │
-│  GPIO 17 ──── Buzzer +      │
-│                             │
+│  GPIO 17 ──── Buzzer +           │
+│                                  │
 │  GPIO 1,2,42,41 ── Keypad Rows   │
 │  GPIO 40,39,38,37 ── Keypad Cols │
-│                             │
-│  GND ──── All component GNDs │
-└─────────────────────────────┘
+│                                  │
+│  GND ──── All component GNDs     │
+└──────────────────────────────────┘
 ```
 
 > ⚠️ **RFID runs on 3.3V only** — never connect to 5V. Servo needs 5V from the VIN pin.
@@ -231,13 +231,7 @@ Digital-Safe-System/
 
 ## 🏗️ 3D Printed Maquette
 
-The safe enclosure is designed in OpenSCAD with 3 printable parts:
-
-| Part | Description |
-|------|-------------|
-| **Base Box** | Main enclosure with servo shelf, ESP32 mount, screw posts |
-| **Door** | Front panel with OLED window, LED holes, buzzer grille, handle, hinges |
-| **Lid** | Top cover with screw holes and engraved text |
+The safe enclosure is designed in [https://tinkercad.com/](https://www.tinkercad.com/) 3D Design with 3 printable parts:
 
 **Print Settings:** PLA, 0.2mm layer height, 20% infill, no supports needed.
 
