@@ -1,22 +1,8 @@
 /*
  * ============================================================
- *  Digital Safe System - ESP32-S3 (Real Hardware)
- *  25CSCI11C - Introduction to Embedded Systems
- *  British University in Egypt - Group A-14
+ *  Digital Safe System (A1401) - ESP32-S3
  * ============================================================
- *  Team: Zeina Alaaeldin (254588), Zainab Sabit (257156),
- *        Mahmoud Samir (257678), Ziad Youssef (257745)
- * ============================================================
- *  OLED:     1.5" SH1107 128x128 I2C (SDA=8, SCL=9)
- *  RFID:     MFRC522 SPI (SS=10, RST=14, SCK=12, MOSI=11, MISO=13)
- *  Servo:    GPIO 18
- *  Red LED:  GPIO 15 (via 220 ohm)
- *  Green LED:GPIO 16 (via 220 ohm)
- *  Buzzer:   GPIO 17
- *  Keypad:   Rows=1,2,42,41  Cols=40,39,38,37
- *  Bluetooth:ESP32-S3 built-in BLE
- * ============================================================
- */
+*/
 
 #include <SPI.h>
 #include <MFRC522.h>
@@ -31,7 +17,9 @@
 #include <BLEUtils.h>
 #include <BLE2902.h>
 
-// ─── Pins ────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// Pins
+// ─────────────────────────────────────────────────────────────
 #define RFID_SS   10
 #define RFID_RST  14
 #define OLED_SDA  8
@@ -41,16 +29,45 @@
 #define GREEN_LED 16
 #define BUZZER    17
 
-// ─── OLED (1.5" SH1107 128x128) ─────────────────────────────
+// ─────────────────────────────────────────────────────────────
+// BLE UUIDs
+// ─────────────────────────────────────────────────────────────
+#define SERVICE_UUID  "12345678-1234-1234-1234-123456789abc"
+#define TX_UUID       "abcd1234-ab12-cd34-ef56-123456789abc"
+#define RX_UUID       "abcd5678-ab12-cd34-ef56-123456789abc"
+
+// ─────────────────────────────────────────────────────────────
+// EEPROM
+// ─────────────────────────────────────────────────────────────
+#define EEPROM_SIZE       128
+#define EEPROM_PASS_FLAG  0
+#define EEPROM_PASS       1
+#define EEPROM_RFID_FLAG  10
+#define EEPROM_RFID_LEN   11
+#define EEPROM_RFID_DATA  12
+
+// ─────────────────────────────────────────────────────────────
+// Constants
+// ─────────────────────────────────────────────────────────────
+const int PASSWORD_LENGTH = 4;
+const int MAX_FAILS = 4;
+const unsigned long BASE_LOCKOUT_MS = 30000UL;
+const unsigned long RFID_COOLDOWN_MS = 1000UL;
+
+// Continuous rotation servo:
+// 0 / 180 = move, 90 = stop
+const int SERVO_STOP      = 90;
+const int SERVO_LOCK      = 0;     // swap with SERVO_UNLOCK if reversed
+const int SERVO_UNLOCK    = 180;   // swap with SERVO_LOCK if reversed
+const int SERVO_MOVE_MS   = 300;   // adjust 200-500 if needed
+
+// ─────────────────────────────────────────────────────────────
+// Objects
+// ─────────────────────────────────────────────────────────────
 Adafruit_SH1107 display(128, 128, &Wire, -1);
-
-// ─── RFID ────────────────────────────────────────────────────
 MFRC522 rfid(RFID_SS, RFID_RST);
-
-// ─── Servo ───────────────────────────────────────────────────
 Servo lockServo;
 
-// ─── Keypad ──────────────────────────────────────────────────
 const byte ROWS = 4, COLS = 4;
 char keys[ROWS][COLS] = {
   {'1','2','3','A'},
@@ -62,100 +79,329 @@ byte rowPins[ROWS] = {1, 2, 42, 41};
 byte colPins[COLS] = {40, 39, 38, 37};
 Keypad keypad = Keypad(makeKeymap(keys), rowPins, colPins, ROWS, COLS);
 
-// ─── BLE ─────────────────────────────────────────────────────
-#define SERVICE_UUID  "12345678-1234-1234-1234-123456789abc"
-#define TX_UUID       "abcd1234-ab12-cd34-ef56-123456789abc"
-#define RX_UUID       "abcd5678-ab12-cd34-ef56-123456789abc"
 BLEServer* pServer = NULL;
 BLECharacteristic* pTxChar = NULL;
-bool bleConnected = false;
-String bleCommand = "";
-bool newBleCmd = false;
 
-// ─── EEPROM ──────────────────────────────────────────────────
-#define EEPROM_SIZE  64
-#define EEPROM_FLAG  0
-#define EEPROM_PASS  1
-#define EEPROM_RFID  10
-
-// ─── State ───────────────────────────────────────────────────
-String password    = "1234";
-String masterCode  = "0000";
-String input       = "";
-String rfidUID     = "";
-bool   isOpen      = false;
-bool   lockedOut   = false;
-int    fails       = 0;
-bool   changingPass = false;
-bool   oldPassOk   = false;
-bool   regRFID     = false;
-
-// ═════════════════════════════════════════════════════════════
-//                     BLE CALLBACKS
-// ═════════════════════════════════════════════════════════════
-class ServerCB : public BLEServerCallbacks {
-  void onConnect(BLEServer* s)    { bleConnected = true;  }
-  void onDisconnect(BLEServer* s) { bleConnected = false; s->startAdvertising(); }
+// ─────────────────────────────────────────────────────────────
+// Enums
+// ─────────────────────────────────────────────────────────────
+enum AppState {
+  STATE_SETUP_PASSWORD,
+  STATE_LOCKED,
+  STATE_ENTER_PASSWORD,
+  STATE_CHANGE_OLD,
+  STATE_CHANGE_NEW,
+  STATE_MASTER_CODE,
+  STATE_MASTER_MENU,
+  STATE_REGISTER_RFID,
+  STATE_OPEN,
+  STATE_LOCKOUT
 };
 
-class RxCB : public BLECharacteristicCallbacks {
-  void onWrite(BLECharacteristic* c) {
-    String v = c->getValue().c_str();
-    v.trim();
-    if (v.length() > 0) { bleCommand = v; newBleCmd = true; }
+enum InputMode {
+  MODE_KEYPAD,
+  MODE_CHAR
+};
+
+// ─────────────────────────────────────────────────────────────
+// Global State
+// ─────────────────────────────────────────────────────────────
+AppState state = STATE_LOCKED;
+InputMode inputMode = MODE_KEYPAD;
+
+String password = "";
+String masterCode = "0000";
+String input = "";
+String rfidUID = "";
+String bleCommand = "";
+
+bool passwordConfigured = false;
+bool rfidConfigured = false;
+bool bleConnected = false;
+bool newBleCmd = false;
+bool starWaitingForHash = false;
+
+int fails = 0;
+int lockCycle = 0; // 0=>30s, 1=>60s, 2=>120s, 3=>240s
+unsigned long lockoutUntil = 0;
+unsigned long lastLockoutDraw = 0;
+unsigned long lastRfidActionAt = 0;
+
+// ─────────────────────────────────────────────────────────────
+// BLE Callbacks
+// ─────────────────────────────────────────────────────────────
+class ServerCB : public BLEServerCallbacks {
+  void onConnect(BLEServer* s) override {
+    bleConnected = true;
+  }
+
+  void onDisconnect(BLEServer* s) override {
+    bleConnected = false;
+    s->startAdvertising();
   }
 };
 
-// ═════════════════════════════════════════════════════════════
-//                       HELPERS
-// ═════════════════════════════════════════════════════════════
-void beep(int ms) { digitalWrite(BUZZER, HIGH); delay(ms); digitalWrite(BUZZER, LOW); }
-void successBeep() { beep(100); delay(80); beep(100); }
-void errorBeep() { beep(150); delay(100); beep(150); delay(100); beep(150); }
+class RxCB : public BLECharacteristicCallbacks {
+  void onWrite(BLECharacteristic* c) override {
+    String value = c->getValue().c_str();
+    value.trim();
+    if (value.length() > 0) {
+      bleCommand = value;
+      newBleCmd = true;
+    }
+  }
+};
 
-void bleSend(String msg) {
+// ─────────────────────────────────────────────────────────────
+// Forward Declarations
+// ─────────────────────────────────────────────────────────────
+void bleSend(const String& msg);
+void beep(int ms);
+void successBeep();
+void errorBeep();
+void longErrorBeep();
+void inputFeedback();
+String maskInput(const String& value);
+void clearInput();
+bool isInputKey(char key);
+char mapCharMode(char key);
+unsigned long lockDurationForCycle(int cycleIndex);
+unsigned long currentLockDurationMs();
+unsigned long nextLockDurationMs();
+void savePassword();
+void loadPassword();
+void clearRFIDStorage();
+void saveRFID();
+void loadRFID();
+void factoryResetSafe();
+String readUID();
+void showText(String l1, String l2 = "", String l3 = "");
+void drawLockIcon(int x, int y, bool locked);
+void showWelcomeScreen();
+void showLockedScreen();
+void showOpenScreen();
+void showPasswordEntry(const String& title);
+void showLockoutScreen(unsigned long remainingSec);
+void showMasterMenu();
+void showBootResetHint();
+void animSplash();
+void animLoadingBar();
+void animChecking(const String& msg = "Checking");
+void animUnlock();
+void animLock();
+void stopServo();
+void moveServoFor(int value, int durationMs);
+void lockSafe();
+void unlockSafe();
+void flashWrongFeedback();
+void startLockout();
+void onSuccessfulAccess();
+void onFailedAccess();
+void verifyPasswordCandidate(const String& candidate);
+void updateLockoutCountdown();
+void appendInputChar(char key, const String& title);
+void startFreshRfidRegistration();
+void handlePasswordSetupConfirm();
+void handlePasswordChangeConfirm();
+void confirmMasterCode();
+void processEntryStateKey(char key, const String& title, void (*onConfirm)());
+void handleBleCommand();
+void handleRfidRegistration();
+void handleRfidScan();
+void handleLockedKey(char key);
+void handleMasterMenuKey(char key);
+void checkFactoryResetOnBoot();
+void handleKeypad();
+void setup();
+void loop();
+
+// ─────────────────────────────────────────────────────────────
+// Generic Helpers
+// ─────────────────────────────────────────────────────────────
+void bleSend(const String& msg) {
   if (bleConnected && pTxChar) {
     pTxChar->setValue(msg.c_str());
     pTxChar->notify();
   }
 }
 
-String stars() {
+void beep(int ms) {
+  digitalWrite(BUZZER, HIGH);
+  delay(ms);
+  digitalWrite(BUZZER, LOW);
+}
+
+void successBeep() {
+  beep(100);
+  delay(70);
+  beep(100);
+}
+
+void errorBeep() {
+  beep(220);
+  delay(80);
+  beep(220);
+}
+
+void longErrorBeep() {
+  beep(700);
+}
+
+void inputFeedback() {
+  digitalWrite(GREEN_LED, HIGH);
+  beep(35);
+  delay(30);
+  digitalWrite(GREEN_LED, LOW);
+  if (state != STATE_OPEN) digitalWrite(RED_LED, HIGH);
+}
+
+String maskInput(const String& value) {
   String s = "";
-  for (unsigned int i = 0; i < input.length(); i++) s += "*";
+  for (unsigned int i = 0; i < value.length(); i++) s += "*";
   return s;
 }
 
-// ─── EEPROM ──────────────────────────────────────────────────
+void clearInput() {
+  input = "";
+  inputMode = MODE_KEYPAD;
+  starWaitingForHash = false;
+}
+
+bool isInputKey(char key) {
+  return (key >= '0' && key <= '9') || key == 'A' || key == 'B' || key == 'C' || key == 'D';
+}
+
+char mapCharMode(char key) {
+  switch (key) {
+    case '1': return 'A';
+    case '2': return 'B';
+    case '3': return 'C';
+    case '4': return 'D';
+    case '5': return 'E';
+    case '6': return 'F';
+    case '7': return 'G';
+    case '8': return 'H';
+    case '9': return 'I';
+    case '0': return 'J';
+    case 'A': return 'K';
+    case 'B': return 'L';
+    case 'C': return 'M';
+    case 'D': return 'N';
+    default:  return key;
+  }
+}
+
+unsigned long lockDurationForCycle(int cycleIndex) {
+  switch (cycleIndex % 4) {
+    case 0: return 30000UL;
+    case 1: return 60000UL;
+    case 2: return 120000UL;
+    case 3: return 240000UL;
+  }
+  return 30000UL;
+}
+
+unsigned long currentLockDurationMs() {
+  return lockDurationForCycle(lockCycle);
+}
+
+unsigned long nextLockDurationMs() {
+  return lockDurationForCycle((lockCycle + 1) % 4);
+}
+
+// ─────────────────────────────────────────────────────────────
+// EEPROM
+// ─────────────────────────────────────────────────────────────
 void savePassword() {
-  EEPROM.write(EEPROM_FLAG, 0xAA);
-  for (int i = 0; i < 4; i++) EEPROM.write(EEPROM_PASS + i, password[i]);
+  EEPROM.write(EEPROM_PASS_FLAG, 0xAA);
+  for (int i = 0; i < PASSWORD_LENGTH; i++) {
+    char ch = (i < (int)password.length()) ? password[i] : '0';
+    EEPROM.write(EEPROM_PASS + i, ch);
+  }
   EEPROM.commit();
+  passwordConfigured = true;
 }
 
 void loadPassword() {
-  if (EEPROM.read(EEPROM_FLAG) == 0xAA) {
+  if (EEPROM.read(EEPROM_PASS_FLAG) == 0xAA) {
     password = "";
-    for (int i = 0; i < 4; i++) password += (char)EEPROM.read(EEPROM_PASS + i);
+    bool valid = true;
+    for (int i = 0; i < PASSWORD_LENGTH; i++) {
+      char ch = (char)EEPROM.read(EEPROM_PASS + i);
+      if (ch == 0 || ch == 255) valid = false;
+      password += ch;
+    }
+    passwordConfigured = valid && password.length() == PASSWORD_LENGTH;
+    if (!passwordConfigured) password = "";
+  } else {
+    password = "";
+    passwordConfigured = false;
   }
+}
+
+void clearRFIDStorage() {
+  EEPROM.write(EEPROM_RFID_FLAG, 0x00);
+  EEPROM.write(EEPROM_RFID_LEN, 0);
+  for (int i = 0; i < 16; i++) EEPROM.write(EEPROM_RFID_DATA + i, 0);
+  EEPROM.commit();
+  rfidUID = "";
+  rfidConfigured = false;
 }
 
 void saveRFID() {
-  EEPROM.write(EEPROM_RFID, rfidUID.length());
-  for (unsigned int i = 0; i < rfidUID.length() && i < 14; i++)
-    EEPROM.write(EEPROM_RFID + 1 + i, rfidUID[i]);
+  byte len = (byte)rfidUID.length();
+  EEPROM.write(EEPROM_RFID_FLAG, 0x55);
+  EEPROM.write(EEPROM_RFID_LEN, len);
+  for (int i = 0; i < 16; i++) {
+    EEPROM.write(EEPROM_RFID_DATA + i, (i < len) ? rfidUID[i] : 0);
+  }
   EEPROM.commit();
+  rfidConfigured = (len > 0);
 }
 
 void loadRFID() {
-  byte len = EEPROM.read(EEPROM_RFID);
-  if (len > 0 && len < 15) {
-    rfidUID = "";
-    for (int i = 0; i < len; i++) rfidUID += (char)EEPROM.read(EEPROM_RFID + 1 + i);
+  if (EEPROM.read(EEPROM_RFID_FLAG) == 0x55) {
+    byte len = EEPROM.read(EEPROM_RFID_LEN);
+    if (len > 0 && len < 17) {
+      rfidUID = "";
+      for (int i = 0; i < len; i++) {
+        rfidUID += (char)EEPROM.read(EEPROM_RFID_DATA + i);
+      }
+      rfidConfigured = true;
+      return;
+    }
   }
+
+  rfidUID = "";
+  rfidConfigured = false;
 }
 
-// ─── RFID ────────────────────────────────────────────────────
+void factoryResetSafe() {
+  for (int i = 0; i < EEPROM_SIZE; i++) EEPROM.write(i, 0);
+  EEPROM.commit();
+
+  password = "";
+  rfidUID = "";
+  passwordConfigured = false;
+  rfidConfigured = false;
+  fails = 0;
+  lockCycle = 0;
+  lockoutUntil = 0;
+  lastLockoutDraw = 0;
+  lastRfidActionAt = 0;
+  clearInput();
+
+  showText("Factory Reset", "Safe is brand new");
+  successBeep();
+  delay(1200);
+
+  state = STATE_SETUP_PASSWORD;
+  showPasswordEntry("SET NEW PASS");
+}
+
+// ─────────────────────────────────────────────────────────────
+// RFID
+// ─────────────────────────────────────────────────────────────
 String readUID() {
   String uid = "";
   for (byte i = 0; i < rfid.uid.size; i++) {
@@ -166,23 +412,25 @@ String readUID() {
   return uid;
 }
 
-// ═════════════════════════════════════════════════════════════
-//                    DISPLAY FUNCTIONS
-// ═════════════════════════════════════════════════════════════
-void showText(String l1, String l2 = "", String l3 = "") {
+// ─────────────────────────────────────────────────────────────
+// Display / UI
+// ─────────────────────────────────────────────────────────────
+void showText(String l1, String l2, String l3) {
   display.clearDisplay();
-  display.setTextSize(1);
   display.setTextColor(SH110X_WHITE);
+  display.setTextSize(1);
   display.setCursor(0, 10);  display.println(l1);
   display.setCursor(0, 35);  display.println(l2);
-  if (l3.length() > 0) { display.setCursor(0, 60); display.println(l3); }
+  if (l3.length() > 0) {
+    display.setCursor(0, 60);
+    display.println(l3);
+  }
   display.display();
 }
 
 void drawLockIcon(int x, int y, bool locked) {
-  // Lock body
   display.fillRoundRect(x, y + 25, 40, 35, 5, SH110X_WHITE);
-  // Shackle
+
   if (locked) {
     display.drawRoundRect(x + 8, y, 24, 28, 10, SH110X_WHITE);
     display.drawRoundRect(x + 10, y + 2, 20, 26, 8, SH110X_WHITE);
@@ -192,183 +440,254 @@ void drawLockIcon(int x, int y, bool locked) {
     display.drawRoundRect(x + 16, y - 3, 20, 26, 8, SH110X_WHITE);
     display.fillRect(x + 15, y + 18, 22, 10, SH110X_BLACK);
   }
-  // Keyhole
+
   display.fillCircle(x + 20, y + 38, 4, SH110X_BLACK);
   display.fillRect(x + 18, y + 42, 5, 7, SH110X_BLACK);
 }
 
-void showLocked() {
+void showWelcomeScreen() {
   display.clearDisplay();
   display.drawRoundRect(2, 2, 124, 124, 6, SH110X_WHITE);
-
-  drawLockIcon(44, 10, true);
-
-  display.setTextSize(1);
+  drawLockIcon(44, 12, true);
   display.setTextColor(SH110X_WHITE);
-  display.setCursor(25, 75);  display.println("SAFE  LOCKED");
-  display.setCursor(15, 90);  display.println("0-9: Enter pass");
-  display.setCursor(15, 100); display.println("A:ChgPass B:RFID");
-  display.setCursor(15, 110); display.println("D:Master code");
+  display.setTextSize(1);
+  display.setCursor(25, 78); display.println("WELCOME USER");
+  display.setCursor(18, 94); display.println("DIGITAL SAFE SYS");
+  display.setCursor(14, 108); display.println("Keypad | RFID | BLE");
   display.display();
 }
 
-void showUnlocked() {
+void showLockedScreen() {
   display.clearDisplay();
   display.drawRoundRect(2, 2, 124, 124, 6, SH110X_WHITE);
+  drawLockIcon(44, 8, true);
 
-  drawLockIcon(44, 10, false);
+  display.setTextSize(1);
+  display.setTextColor(SH110X_WHITE);
+  display.setCursor(28, 72);
+  display.println("SAFE LOCKED");
+  display.setCursor(18, 86);
+  display.println("Enter password");
+  display.setCursor(10, 102);
+  display.println("A:Chg  B:New RFID");
+  display.setCursor(10, 114);
+  display.println("D:Master  RFID:Tap");
+  display.display();
+}
+
+void showOpenScreen() {
+  display.clearDisplay();
+  display.drawRoundRect(2, 2, 124, 124, 6, SH110X_WHITE);
+  drawLockIcon(44, 8, false);
 
   display.setTextSize(2);
   display.setTextColor(SH110X_WHITE);
-  display.setCursor(25, 78);
+  display.setCursor(24, 74);
   display.println("OPEN");
 
   display.setTextSize(1);
-  display.setCursor(20, 105);
-  display.println("Press # to CLOSE");
+  display.setCursor(18, 100);
+  display.println("# or RFID closes");
+  display.setCursor(30, 112);
+  display.println("safe now");
   display.display();
 }
 
-void showPasswordEntry(String title, String masked) {
+void showPasswordEntry(const String& title) {
   display.clearDisplay();
   display.drawRoundRect(2, 2, 124, 124, 6, SH110X_WHITE);
 
-  display.setTextSize(1);
   display.setTextColor(SH110X_WHITE);
-  display.setCursor(15, 20);
+  display.setTextSize(1);
+  display.setCursor(12, 12);
   display.println(title);
 
-  // Draw input boxes
-  for (int i = 0; i < 4; i++) {
-    int bx = 20 + i * 25;
-    display.drawRoundRect(bx, 45, 20, 28, 4, SH110X_WHITE);
-    if (i < (int)masked.length()) {
+  int startX = 12;
+  int boxY = 36;
+  int boxW = 22;
+  int boxH = 28;
+  int gap = 8;
+
+  for (int i = 0; i < PASSWORD_LENGTH; i++) {
+    int x = startX + i * (boxW + gap);
+    display.drawRoundRect(x, boxY, boxW, boxH, 4, SH110X_WHITE);
+    if (i < (int)input.length()) {
       display.setTextSize(2);
-      display.setCursor(bx + 5, 49);
+      display.setCursor(x + 6, boxY + 7);
       display.print("*");
     }
   }
 
   display.setTextSize(1);
-  display.setCursor(15, 85);
-  display.println("# to confirm");
-  display.setCursor(15, 100);
-  display.println("* to cancel");
+  display.setCursor(12, 78);
+  display.print("Mode: ");
+  display.println(inputMode == MODE_CHAR ? "CHAR" : "KEYPAD");
+
+  display.setCursor(12, 94);
+  display.println("A:abc  B:123");
+  display.setCursor(12, 108);
+  display.println("#:OK  *:Clear/Back");
   display.display();
 }
 
-// ─── Animations ──────────────────────────────────────────────
+void showLockoutScreen(unsigned long remainingSec) {
+  display.clearDisplay();
+  display.drawRoundRect(2, 2, 124, 124, 6, SH110X_WHITE);
+  display.setTextSize(2);
+  display.setTextColor(SH110X_WHITE);
+  display.setCursor(18, 20);
+  display.println("LOCKED");
+  display.setTextSize(1);
+  display.setCursor(20, 55);
+  display.println("Too many wrong tries");
+  display.setCursor(16, 72);
+  display.print("Wait: ");
+  display.print(remainingSec);
+  display.println(" sec");
+  display.setCursor(8, 92);
+  display.print("Next lock: ");
+  display.print(nextLockDurationMs() / 1000UL);
+  display.println("s");
+  display.setCursor(8, 108);
+  display.println("Master/RFID blocked too");
+  display.display();
+}
+
+void showMasterMenu() {
+  display.clearDisplay();
+  display.drawRoundRect(2, 2, 124, 124, 6, SH110X_WHITE);
+  display.setTextColor(SH110X_WHITE);
+  display.setTextSize(1);
+  display.setCursor(16, 16);
+  display.println("MASTER MENU");
+  display.setCursor(10, 42);
+  display.println("A: Reset Password");
+  display.setCursor(10, 58);
+  display.println("B: Reset RFID");
+  display.setCursor(10, 74);
+  display.println("#: Open Safe");
+  display.setCursor(10, 90);
+  display.println("*: Cancel");
+  display.setCursor(10, 108);
+  display.println("Admin recovery");
+  display.display();
+}
+
+void showBootResetHint() {
+  display.clearDisplay();
+  display.drawRoundRect(2, 2, 124, 124, 6, SH110X_WHITE);
+  display.setTextColor(SH110X_WHITE);
+  display.setTextSize(1);
+  display.setCursor(10, 22);
+  display.println("Boot options");
+  display.setCursor(10, 42);
+  display.println("Hold D for reset");
+  display.setCursor(10, 58);
+  display.println("to make safe new");
+  display.setCursor(10, 84);
+  display.println("Wait 2 sec...");
+  display.display();
+}
+
 void animSplash() {
   display.clearDisplay();
   display.drawRoundRect(4, 4, 120, 120, 8, SH110X_WHITE);
   display.drawRoundRect(6, 6, 116, 116, 6, SH110X_WHITE);
   display.display();
-  delay(300);
+  delay(250);
 
-  // Type "DIGITAL"
   display.setTextSize(2);
   display.setTextColor(SH110X_WHITE);
+
   const char* w1 = "DIGITAL";
   for (int i = 0; i < 7; i++) {
     display.setCursor(16 + i * 14, 25);
     display.print(w1[i]);
     display.display();
-    delay(100);
+    delay(90);
   }
 
-  // Type "SAFE"
   const char* w2 = "SAFE";
   for (int i = 0; i < 4; i++) {
     display.setCursor(30 + i * 14, 50);
     display.print(w2[i]);
     display.display();
-    delay(100);
+    delay(90);
   }
 
-  delay(300);
   display.setTextSize(1);
-  display.setCursor(20, 80);
-  display.println("Group A-14");
-  display.setCursor(8, 95);
-  display.println("BUE | ES Project");
+  display.setCursor(20, 82);
+  display.println("Welcome user");
+  display.setCursor(18, 96);
+  display.println("System starting...");
   display.display();
-  delay(1500);
+  delay(1000);
 }
 
 void animLoadingBar() {
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SH110X_WHITE);
-  display.setCursor(15, 30);
+  display.setCursor(12, 30);
   display.println("INITIALIZING...");
   display.drawRoundRect(14, 55, 100, 16, 4, SH110X_WHITE);
   display.display();
 
-  for (int i = 0; i <= 96; i += 3) {
+  for (int i = 0; i <= 96; i += 4) {
     display.fillRoundRect(16, 57, i, 12, 3, SH110X_WHITE);
-    display.fillRect(30, 80, 70, 15, SH110X_BLACK);
-    display.setCursor(45, 82);
+    display.fillRect(32, 82, 60, 12, SH110X_BLACK);
+    display.setCursor(42, 82);
     display.print((i * 100) / 96);
     display.print("%");
     display.display();
-    delay(25);
+    delay(22);
   }
+  delay(400);
+}
 
-  display.setCursor(40, 100);
-  display.println("READY!");
-  display.display();
-  delay(800);
+void animChecking(const String& msg) {
+  for (int i = 0; i < 3; i++) {
+    display.clearDisplay();
+    display.drawRoundRect(2, 2, 124, 124, 6, SH110X_WHITE);
+    drawLockIcon(44, 10, true);
+
+    display.setTextSize(1);
+    display.setTextColor(SH110X_WHITE);
+    display.setCursor(28, 80);
+    display.print(msg);
+    for (int j = 0; j <= i; j++) display.print(".");
+
+    display.drawRoundRect(18, 102, 92, 10, 3, SH110X_WHITE);
+    display.fillRoundRect(20, 104, (i + 1) * 28, 6, 2, SH110X_WHITE);
+    display.display();
+    delay(220);
+  }
 }
 
 void animUnlock() {
-  // Shackle opening animation
   for (int offset = 0; offset <= 12; offset += 2) {
     display.clearDisplay();
     display.drawRoundRect(2, 2, 124, 124, 6, SH110X_WHITE);
-
-    // Lock body
     display.fillRoundRect(44, 45, 40, 35, 5, SH110X_WHITE);
-    // Moving shackle
     display.drawRoundRect(52 + offset / 2, 20 - offset, 24, 28, 10, SH110X_WHITE);
     display.drawRoundRect(54 + offset / 2, 22 - offset, 20, 26, 8, SH110X_WHITE);
     display.fillRect(53 + offset / 2, 42 - offset, 22, 10, SH110X_BLACK);
-    // Keyhole
     display.fillCircle(64, 58, 4, SH110X_BLACK);
     display.fillRect(62, 62, 5, 7, SH110X_BLACK);
 
     display.setTextSize(1);
     display.setTextColor(SH110X_WHITE);
-    display.setCursor(25, 90);
-    display.println("UNLOCKING...");
+    display.setCursor(26, 92);
+    display.println("OPENING...");
     display.display();
     delay(70);
   }
-
-  // Flash
-  display.invertDisplay(true);  delay(100);
-  display.invertDisplay(false); delay(100);
-  display.invertDisplay(true);  delay(80);
-  display.invertDisplay(false);
-
-  // ACCESS GRANTED
-  display.clearDisplay();
-  display.drawRoundRect(2, 2, 124, 124, 6, SH110X_WHITE);
-  display.setTextSize(2);
-  display.setTextColor(SH110X_WHITE);
-  display.setCursor(12, 40);
-  display.println("ACCESS");
-  display.setCursor(8, 65);
-  display.println("GRANTED");
-  display.display();
-  delay(1000);
 }
 
 void animLock() {
-  // Shackle closing animation
   for (int offset = 12; offset >= 0; offset -= 2) {
     display.clearDisplay();
     display.drawRoundRect(2, 2, 124, 124, 6, SH110X_WHITE);
-
     display.fillRoundRect(44, 45, 40, 35, 5, SH110X_WHITE);
     display.drawRoundRect(52 + offset / 2, 20 - offset, 24, 28, 10, SH110X_WHITE);
     display.drawRoundRect(54 + offset / 2, 22 - offset, 20, 26, 8, SH110X_WHITE);
@@ -378,97 +697,608 @@ void animLock() {
 
     display.setTextSize(1);
     display.setTextColor(SH110X_WHITE);
-    display.setCursor(30, 90);
+    display.setCursor(30, 92);
     display.println("LOCKING...");
     display.display();
     delay(70);
   }
-  delay(300);
 }
 
-void animAlarm() {
-  for (int i = 0; i < 10; i++) {
-    display.clearDisplay();
-    display.setTextSize(2);
-    display.setTextColor(SH110X_WHITE);
-    display.setCursor(10, 30);
-    display.println("ALARM!");
-    display.setTextSize(1);
-    display.setCursor(10, 60);
-    display.println("INTRUDER ALERT");
-    display.display();
-
-    digitalWrite(RED_LED, HIGH);
-    digitalWrite(BUZZER, HIGH);
-    delay(200);
-
-    display.invertDisplay(true);
-    digitalWrite(RED_LED, LOW);
-    digitalWrite(BUZZER, LOW);
-    delay(200);
-    display.invertDisplay(false);
-  }
-  digitalWrite(RED_LED, HIGH);
+// ─────────────────────────────────────────────────────────────
+// Servo
+// ─────────────────────────────────────────────────────────────
+void stopServo() {
+  lockServo.write(SERVO_STOP);
 }
 
-// ─── Lock / Unlock ───────────────────────────────────────────
+void moveServoFor(int value, int durationMs) {
+  lockServo.write(value);
+  delay(durationMs);
+  lockServo.write(SERVO_STOP);
+}
+
 void lockSafe() {
-  isOpen = false;
-  lockServo.write(0);
+  state = STATE_LOCKED;
+  moveServoFor(SERVO_LOCK, SERVO_MOVE_MS);
   digitalWrite(RED_LED, HIGH);
   digitalWrite(GREEN_LED, LOW);
   animLock();
-  beep(200);
-  showLocked();
+  beep(120);
+  showLockedScreen();
   bleSend("STATUS:LOCKED");
-  Serial.println("[LOCKED]");
 }
 
 void unlockSafe() {
-  isOpen = true;
-  lockServo.write(90);
+  state = STATE_OPEN;
+  moveServoFor(SERVO_UNLOCK, SERVO_MOVE_MS);
   digitalWrite(RED_LED, LOW);
   digitalWrite(GREEN_LED, HIGH);
   animUnlock();
   successBeep();
-  showUnlocked();
+  showText("Access Granted", "Opening...", "Press # or RFID");
+  delay(700);
+  showOpenScreen();
   bleSend("STATUS:UNLOCKED");
-  Serial.println("[UNLOCKED]");
 }
 
-// ═════════════════════════════════════════════════════════════
-//                         SETUP
-// ═════════════════════════════════════════════════════════════
+// ─────────────────────────────────────────────────────────────
+// Security
+// ─────────────────────────────────────────────────────────────
+void flashWrongFeedback() {
+  digitalWrite(RED_LED, HIGH);
+  digitalWrite(GREEN_LED, LOW);
+  longErrorBeep();
+
+  display.clearDisplay();
+  display.drawRoundRect(2, 2, 124, 124, 6, SH110X_WHITE);
+  display.setTextSize(2);
+  display.setTextColor(SH110X_WHITE);
+  display.setCursor(18, 40);
+  display.println("WRONG");
+  display.setTextSize(1);
+  display.setCursor(18, 70);
+  display.println("Password / RFID denied");
+  display.display();
+  delay(900);
+
+  digitalWrite(RED_LED, HIGH);
+}
+
+void startLockout() {
+  clearInput();
+  state = STATE_LOCKOUT;
+  fails = 0;
+
+  unsigned long duration = currentLockDurationMs();
+  lockoutUntil = millis() + duration;
+  lockCycle = (lockCycle + 1) % 4;
+
+  bleSend("STATUS:LOCKED_OUT");
+  showLockoutScreen(duration / 1000UL);
+
+  for (int i = 0; i < 3; i++) {
+    digitalWrite(RED_LED, HIGH);
+    beep(180);
+    delay(120);
+    digitalWrite(RED_LED, LOW);
+    delay(120);
+  }
+
+  digitalWrite(RED_LED, HIGH);
+}
+
+void onSuccessfulAccess() {
+  fails = 0;
+  clearInput();
+  unlockSafe();
+}
+
+void onFailedAccess() {
+  fails++;
+  flashWrongFeedback();
+
+  if (fails >= MAX_FAILS) {
+    startLockout();
+  } else {
+    display.clearDisplay();
+    display.drawRoundRect(2, 2, 124, 124, 6, SH110X_WHITE);
+    display.setTextSize(2);
+    display.setTextColor(SH110X_WHITE);
+    display.setCursor(18, 34);
+    display.println("DENIED");
+    display.setTextSize(1);
+    display.setCursor(15, 66);
+    display.print("Attempts left: ");
+    display.println(MAX_FAILS - fails);
+    display.setCursor(8, 90);
+    display.println("Red LED + long beep done");
+    display.display();
+    delay(1000);
+
+    state = STATE_LOCKED;
+    showLockedScreen();
+  }
+}
+
+void verifyPasswordCandidate(const String& candidate) {
+  animChecking();
+
+  if (candidate == password || candidate == masterCode) {
+    onSuccessfulAccess();
+  } else {
+    onFailedAccess();
+  }
+}
+
+void updateLockoutCountdown() {
+  if (state != STATE_LOCKOUT) return;
+
+  unsigned long now = millis();
+  if (now >= lockoutUntil) {
+    clearInput();
+    state = STATE_LOCKED;
+    lastLockoutDraw = 0;
+    showText("Lockout ended", "Try again");
+    delay(700);
+    showLockedScreen();
+    return;
+  }
+
+  if (now - lastLockoutDraw >= 500) {
+    unsigned long remaining = (lockoutUntil - now + 999UL) / 1000UL;
+    showLockoutScreen(remaining);
+    lastLockoutDraw = now;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Password / Input Logic
+// ─────────────────────────────────────────────────────────────
+void appendInputChar(char key, const String& title) {
+  if (input.length() >= PASSWORD_LENGTH) return;
+
+  starWaitingForHash = false;
+  char value = (inputMode == MODE_CHAR) ? mapCharMode(key) : key;
+  input += value;
+  showPasswordEntry(title);
+}
+
+void startFreshRfidRegistration() {
+  clearInput();
+  state = STATE_REGISTER_RFID;
+  showText("Password Saved", "Scan RFID now");
+}
+
+void handlePasswordSetupConfirm() {
+  if (input.length() != PASSWORD_LENGTH) {
+    errorBeep();
+    showText("Password must be", "exactly 4 chars");
+    delay(900);
+    showPasswordEntry("SET NEW PASS");
+    return;
+  }
+
+  password = input;
+  savePassword();
+  successBeep();
+  clearInput();
+
+  if (!rfidConfigured) {
+    startFreshRfidRegistration();
+  } else {
+    showText("Password Saved", "System ready");
+    delay(1000);
+    state = STATE_LOCKED;
+    showLockedScreen();
+  }
+}
+
+void handlePasswordChangeConfirm() {
+  if (state == STATE_CHANGE_OLD) {
+    animChecking("Verifying");
+
+    if (input == password) {
+      clearInput();
+      state = STATE_CHANGE_NEW;
+      showPasswordEntry("NEW PASSWORD:");
+    } else {
+      errorBeep();
+      clearInput();
+      state = STATE_LOCKED;
+      showText("Wrong current", "password");
+      delay(1000);
+      showLockedScreen();
+    }
+    return;
+  }
+
+  if (input.length() != PASSWORD_LENGTH) {
+    errorBeep();
+    showText("New password must", "be 4 chars");
+    delay(1000);
+    showPasswordEntry("NEW PASSWORD:");
+    return;
+  }
+
+  password = input;
+  savePassword();
+  successBeep();
+  clearInput();
+  state = STATE_LOCKED;
+  showText("Password", "Changed!");
+  delay(1000);
+  showLockedScreen();
+}
+
+void confirmMasterCode() {
+  animChecking("Verifying");
+
+  if (input == masterCode) {
+    clearInput();
+    state = STATE_MASTER_MENU;
+    showMasterMenu();
+  } else {
+    errorBeep();
+    clearInput();
+    state = STATE_LOCKED;
+    showText("Wrong master", "code");
+    delay(900);
+    showLockedScreen();
+  }
+}
+
+void processEntryStateKey(char key, const String& title, void (*onConfirm)()) {
+  if (key == 'A') {
+    inputMode = MODE_CHAR;
+    starWaitingForHash = false;
+    showPasswordEntry(title);
+    return;
+  }
+
+  if (key == 'B') {
+    inputMode = MODE_KEYPAD;
+    starWaitingForHash = false;
+    showPasswordEntry(title);
+    return;
+  }
+
+  if (key == '*') {
+    if (input.length() > 0) {
+      clearInput();
+      showPasswordEntry(title);
+    } else {
+      clearInput();
+      if (state == STATE_SETUP_PASSWORD) {
+        showPasswordEntry(title);
+      } else {
+        state = STATE_LOCKED;
+        showLockedScreen();
+      }
+    }
+    return;
+  }
+
+  if (key == '#') {
+    onConfirm();
+    return;
+  }
+
+  if (isInputKey(key)) {
+    appendInputChar(key, title);
+    return;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// BLE / RFID
+// ─────────────────────────────────────────────────────────────
+void handleBleCommand() {
+  if (!newBleCmd) return;
+  newBleCmd = false;
+
+  String cmd = bleCommand;
+  String cmdUpper = cmd;
+  cmdUpper.trim();
+  cmdUpper.toUpperCase();
+
+  if (state == STATE_LOCKOUT) {
+    bleSend("RESULT:System locked out");
+    return;
+  }
+
+  if (cmdUpper.startsWith("PASS:")) {
+    String p = cmd.substring(5);
+    p.trim();
+    animChecking();
+
+    if (p == password || p == masterCode) {
+      bleSend("RESULT:Access granted");
+      onSuccessfulAccess();
+    } else {
+      bleSend("RESULT:Wrong password");
+      onFailedAccess();
+    }
+  } else if (cmdUpper == "LOCK") {
+    if (state == STATE_OPEN) {
+      lockSafe();
+      bleSend("RESULT:Locked");
+    } else {
+      bleSend("RESULT:Already locked");
+    }
+  } else if (cmdUpper == "STATUS") {
+    if (state == STATE_OPEN) bleSend("STATUS:UNLOCKED");
+    else if (state == STATE_LOCKOUT) bleSend("STATUS:LOCKED_OUT");
+    else bleSend("STATUS:LOCKED");
+  } else if (cmdUpper.startsWith("CHPASS:")) {
+    String p = cmd.substring(7);
+    p.trim();
+
+    if (state != STATE_OPEN) {
+      bleSend("RESULT:Unlock safe first");
+      return;
+    }
+
+    if (p.length() == PASSWORD_LENGTH) {
+      password = p;
+      savePassword();
+      bleSend("RESULT:Password updated");
+      showText("Password changed", "via Bluetooth");
+      delay(700);
+      showOpenScreen();
+    } else {
+      bleSend("RESULT:Password must be 4 chars");
+    }
+  } else if (cmdUpper == "RESETRFID") {
+    if (state != STATE_OPEN) {
+      bleSend("RESULT:Unlock safe first");
+      return;
+    }
+
+    clearRFIDStorage();
+    state = STATE_REGISTER_RFID;
+    bleSend("RESULT:Scan new RFID");
+    showText("RFID cleared", "Scan new card");
+  }
+}
+
+void handleRfidRegistration() {
+  if (state != STATE_REGISTER_RFID) return;
+  if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) return;
+
+  rfidUID = readUID();
+  saveRFID();
+  successBeep();
+  showText("RFID Registered", rfidUID);
+  delay(1300);
+
+  rfid.PICC_HaltA();
+  rfid.PCD_StopCrypto1();
+
+  state = STATE_LOCKED;
+  showLockedScreen();
+}
+
+void handleRfidScan() {
+  if (state == STATE_REGISTER_RFID || state == STATE_LOCKOUT) return;
+  if (!rfidConfigured) return;
+  if (!rfid.PICC_IsNewCardPresent() || !rfid.PICC_ReadCardSerial()) return;
+
+  String uid = readUID();
+
+  rfid.PICC_HaltA();
+  rfid.PCD_StopCrypto1();
+
+  unsigned long now = millis();
+  if (now - lastRfidActionAt < RFID_COOLDOWN_MS) return;
+
+  inputFeedback();
+  animChecking("Reading RFID");
+
+  if (uid == rfidUID) {
+    lastRfidActionAt = now;
+    clearInput();
+
+    if (state == STATE_OPEN) {
+      showText("RFID Accepted", "Closing...");
+      delay(500);
+      lockSafe();
+    } else {
+      showText("RFID Accepted", "Opening...");
+      delay(500);
+      onSuccessfulAccess();
+    }
+    return;
+  }
+
+  showText("RFID Denied", "Unknown card");
+  delay(600);
+  onFailedAccess();
+}
+
+// ─────────────────────────────────────────────────────────────
+// Keypad
+// ─────────────────────────────────────────────────────────────
+void handleLockedKey(char key) {
+  if (key == 'A') {
+    clearInput();
+    state = STATE_CHANGE_OLD;
+    showPasswordEntry("CURRENT PASS:");
+    return;
+  }
+
+  if (key == 'B') {
+    clearInput();
+    state = STATE_REGISTER_RFID;
+    showText("Register RFID", "Scan card now...");
+    return;
+  }
+
+  if (key == 'D') {
+    clearInput();
+    state = STATE_MASTER_CODE;
+    showPasswordEntry("MASTER CODE:");
+    return;
+  }
+
+  if (key == '*') {
+    clearInput();
+    inputMode = MODE_CHAR;
+    starWaitingForHash = false;
+    state = STATE_ENTER_PASSWORD;
+    showPasswordEntry("ENTER PASSWORD:");
+    return;
+  }
+
+  if (isInputKey(key)) {
+    clearInput();
+    state = STATE_ENTER_PASSWORD;
+    appendInputChar(key, "ENTER PASSWORD:");
+  }
+}
+
+void handleMasterMenuKey(char key) {
+  if (key == '*') {
+    clearInput();
+    state = STATE_LOCKED;
+    showLockedScreen();
+    return;
+  }
+
+  if (key == '#') {
+    onSuccessfulAccess();
+    return;
+  }
+
+  if (key == 'A') {
+    clearInput();
+    password = "";
+    passwordConfigured = false;
+    EEPROM.write(EEPROM_PASS_FLAG, 0x00);
+    EEPROM.commit();
+    state = STATE_SETUP_PASSWORD;
+    showPasswordEntry("SET NEW PASS");
+    return;
+  }
+
+  if (key == 'B') {
+    clearRFIDStorage();
+    clearInput();
+    state = STATE_REGISTER_RFID;
+    showText("Register new RFID", "Scan card now...");
+    return;
+  }
+}
+
+void checkFactoryResetOnBoot() {
+  showBootResetHint();
+  unsigned long start = millis();
+  unsigned long heldSince = 0;
+
+  while (millis() - start < 2500UL) {
+    char k = keypad.getKey();
+
+    if (k == 'D') {
+      if (heldSince == 0) heldSince = millis();
+      if (millis() - heldSince >= 1800UL) {
+        factoryResetSafe();
+        return;
+      }
+    } else {
+      heldSince = 0;
+    }
+    delay(20);
+  }
+}
+
+void handleKeypad() {
+  char key = keypad.getKey();
+  if (!key) return;
+
+  inputFeedback();
+
+  if (state == STATE_OPEN) {
+    if (key == '#') lockSafe();
+    return;
+  }
+
+  if (state == STATE_LOCKOUT) return;
+
+  switch (state) {
+    case STATE_SETUP_PASSWORD:
+      processEntryStateKey(key, "SET NEW PASS", handlePasswordSetupConfirm);
+      break;
+
+    case STATE_ENTER_PASSWORD:
+      if (key == '#') {
+        String candidate = input;
+        clearInput();
+        verifyPasswordCandidate(candidate);
+      } else {
+        processEntryStateKey(key, "ENTER PASSWORD:", [](){});
+      }
+      break;
+
+    case STATE_CHANGE_OLD:
+    case STATE_CHANGE_NEW:
+      processEntryStateKey(
+        key,
+        state == STATE_CHANGE_OLD ? "CURRENT PASS:" : "NEW PASSWORD:",
+        handlePasswordChangeConfirm
+      );
+      break;
+
+    case STATE_MASTER_CODE:
+      processEntryStateKey(key, "MASTER CODE:", confirmMasterCode);
+      break;
+
+    case STATE_MASTER_MENU:
+      handleMasterMenuKey(key);
+      break;
+
+    case STATE_REGISTER_RFID:
+      if (key == '*') {
+        clearInput();
+        if (!passwordConfigured) state = STATE_SETUP_PASSWORD;
+        else state = STATE_LOCKED;
+
+        if (state == STATE_SETUP_PASSWORD) showPasswordEntry("SET NEW PASS");
+        else showLockedScreen();
+      }
+      break;
+
+    case STATE_LOCKED:
+      handleLockedKey(key);
+      break;
+
+    default:
+      break;
+  }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Setup / Loop
+// ─────────────────────────────────────────────────────────────
 void setup() {
   Serial.begin(115200);
-  Serial.println("=== Digital Safe - ESP32-S3 ===");
-  Serial.println("Group A-14 | BUE 2026\n");
 
-  // EEPROM
   EEPROM.begin(EEPROM_SIZE);
   loadPassword();
   loadRFID();
 
-  // I2C + OLED
   Wire.begin(OLED_SDA, OLED_SCL);
   if (!display.begin(0x3C, true)) {
-    Serial.println("[ERROR] OLED fail!");
-    while(1);
+    Serial.println("[ERROR] OLED init failed");
+    while (1) {}
   }
   display.setRotation(0);
-  Serial.println("[OK] OLED 1.5\" SH1107 128x128");
 
-  // SPI + RFID
   SPI.begin(12, 13, 11, RFID_SS);
   rfid.PCD_Init();
-  Serial.println("[OK] RFID MFRC522");
 
-  // Servo
-  lockServo.attach(SERVO_PIN);
-  lockServo.write(0);
-  Serial.println("[OK] Servo");
+  lockServo.setPeriodHertz(50);
+  lockServo.attach(SERVO_PIN, 500, 2400);
+  stopServo();
 
-  // GPIO
   pinMode(RED_LED, OUTPUT);
   pinMode(GREEN_LED, OUTPUT);
   pinMode(BUZZER, OUTPUT);
@@ -476,203 +1306,49 @@ void setup() {
   digitalWrite(GREEN_LED, LOW);
   digitalWrite(BUZZER, LOW);
 
-  // BLE
   BLEDevice::init("DigitalSafe_A14");
   pServer = BLEDevice::createServer();
   pServer->setCallbacks(new ServerCB());
+
   BLEService* svc = pServer->createService(SERVICE_UUID);
   pTxChar = svc->createCharacteristic(TX_UUID, BLECharacteristic::PROPERTY_NOTIFY);
   pTxChar->addDescriptor(new BLE2902());
+
   BLECharacteristic* pRx = svc->createCharacteristic(RX_UUID, BLECharacteristic::PROPERTY_WRITE);
   pRx->setCallbacks(new RxCB());
+
   svc->start();
   BLEAdvertising* adv = BLEDevice::getAdvertising();
   adv->addServiceUUID(SERVICE_UUID);
   adv->setScanResponse(true);
   adv->start();
-  Serial.println("[OK] BLE: DigitalSafe_A14");
 
-  // Startup animations
   animSplash();
   animLoadingBar();
+  checkFactoryResetOnBoot();
 
-  showLocked();
-  Serial.println("\nReady! Password: " + password);
+  if (state == STATE_SETUP_PASSWORD) return;
+
+  showWelcomeScreen();
+  successBeep();
+  delay(1200);
+
+  if (!passwordConfigured) {
+    state = STATE_SETUP_PASSWORD;
+    showPasswordEntry("SET NEW PASS");
+  } else if (!rfidConfigured) {
+    state = STATE_REGISTER_RFID;
+    showText("No RFID found", "Scan card now");
+  } else {
+    state = STATE_LOCKED;
+    showLockedScreen();
+  }
 }
 
-// ═════════════════════════════════════════════════════════════
-//                       MAIN LOOP
-// ═════════════════════════════════════════════════════════════
 void loop() {
-
-  // ─── BLE ───────────────────────────────────────────────────
-  if (newBleCmd) {
-    newBleCmd = false;
-    String cmd = bleCommand;
-    if (cmd.startsWith("PASS:")) {
-      String p = cmd.substring(5);
-      if (p == password || p == masterCode) {
-        fails = 0; lockedOut = false;
-        unlockSafe();
-        bleSend("RESULT:Access granted");
-      } else {
-        fails++; errorBeep();
-        bleSend("RESULT:Wrong password");
-        if (fails >= 3) {
-          lockedOut = true;
-          showText("!! LOCKED !!", "BT wrong pass", "Use master/RFID");
-          animAlarm();
-        }
-      }
-    } else if (cmd == "LOCK") {
-      if (isOpen) { lockSafe(); bleSend("RESULT:Locked"); }
-      else bleSend("RESULT:Already locked");
-    } else if (cmd == "STATUS") {
-      bleSend(isOpen ? "STATUS:UNLOCKED" : "STATUS:LOCKED");
-    }
-  }
-
-  // ─── Serial debug ─────────────────────────────────────────
-  if (Serial.available()) {
-    String cmd = Serial.readStringUntil('\n');
-    cmd.trim();
-    if (cmd.startsWith("PASS:")) {
-      String p = cmd.substring(5);
-      if (p == password || p == masterCode) { fails = 0; lockedOut = false; unlockSafe(); }
-      else { fails++; errorBeep(); if (fails >= 3) { lockedOut = true; showText("!! LOCKED !!","",""); animAlarm(); } }
-    } else if (cmd == "LOCK" && isOpen) { lockSafe(); }
-    else if (cmd == "STATUS") { Serial.println(isOpen ? "UNLOCKED" : "LOCKED"); }
-  }
-
-  // ─── RFID (locked) ────────────────────────────────────────
-  if (!isOpen && !regRFID) {
-    if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
-      String uid = readUID();
-      Serial.println("[RFID] " + uid);
-      if (rfidUID.length() > 0 && uid == rfidUID) {
-        fails = 0; lockedOut = false;
-        showText("RFID OK!", "Welcome!"); delay(800);
-        unlockSafe();
-      } else {
-        errorBeep();
-        showText("RFID Denied!", "Unknown card"); delay(1500);
-        lockedOut ? showText("!! LOCKED !!","Too many tries","Use master/RFID") : showLocked();
-      }
-      rfid.PICC_HaltA(); rfid.PCD_StopCrypto1();
-    }
-  }
-
-  // ─── RFID registration ────────────────────────────────────
-  if (regRFID) {
-    if (rfid.PICC_IsNewCardPresent() && rfid.PICC_ReadCardSerial()) {
-      rfidUID = readUID();
-      saveRFID();
-      successBeep();
-      showText("RFID Registered!", rfidUID);
-      Serial.println("[RFID] Saved: " + rfidUID);
-      delay(2000);
-      rfid.PICC_HaltA(); rfid.PCD_StopCrypto1();
-      regRFID = false;
-      showLocked();
-    }
-  }
-
-  // ─── Keypad ───────────────────────────────────────────────
-  char key = keypad.getKey();
-  if (!key) return;
-  beep(50);
-
-  // Safe is open
-  if (isOpen) { if (key == '#') lockSafe(); return; }
-
-  // RFID reg mode
-  if (regRFID) { if (key == '*') { regRFID = false; showLocked(); } return; }
-
-  // Changing password
-  if (changingPass) {
-    if (key >= '0' && key <= '9' && input.length() < 4) {
-      input += key;
-      showPasswordEntry(oldPassOk ? "NEW PASSWORD:" : "CURRENT PASS:", stars());
-    } else if (key == '#') {
-      if (!oldPassOk) {
-        if (input == password) {
-          oldPassOk = true; input = "";
-          showText("Verified!", "Enter new pass:");
-        } else {
-          errorBeep(); changingPass = false; oldPassOk = false; input = "";
-          showText("Wrong!", ""); delay(1500); showLocked();
-        }
-      } else if (input.length() == 4) {
-        password = input; savePassword();
-        successBeep(); changingPass = false; oldPassOk = false; input = "";
-        showText("Password", "Changed!"); delay(1500); showLocked();
-      }
-    } else if (key == '*') { changingPass = false; oldPassOk = false; input = ""; showLocked(); }
-    return;
-  }
-
-  // Locked out
-  if (lockedOut) {
-    if (key >= '0' && key <= '9' && input.length() < 4) {
-      input += key;
-      showPasswordEntry("MASTER CODE:", stars());
-    } else if (key == '#') {
-      if (input == masterCode) {
-        fails = 0; lockedOut = false; input = "";
-        successBeep(); showText("Master Reset!",""); delay(1500); unlockSafe();
-      } else {
-        input = ""; errorBeep();
-        showText("WRONG","Try again"); delay(1500);
-        showText("!! LOCKED !!","Too many tries","Use master/RFID");
-      }
-    } else if (key == '*') { input = ""; showText("!! LOCKED !!","Too many tries","Use master/RFID"); }
-    return;
-  }
-
-  // Normal locked — enter password
-  if (key >= '0' && key <= '9') {
-    input = String(key);
-    showPasswordEntry("ENTER PASSWORD:", "*");
-    while (true) {
-      char k = keypad.getKey();
-      if (!k) { delay(10); continue; }
-      beep(50);
-      if (k >= '0' && k <= '9' && input.length() < 4) {
-        input += k;
-        showPasswordEntry("ENTER PASSWORD:", stars());
-      }
-      else if (k == '#') {
-        if (input == password || input == masterCode) { fails = 0; input = ""; unlockSafe(); }
-        else {
-          fails++; input = ""; errorBeep();
-          if (fails >= 3) {
-            lockedOut = true;
-            showText("!! LOCKED !!","Too many tries","Use master/RFID");
-            animAlarm();
-          } else {
-            showText("WRONG!","Attempts left:", String(3 - fails));
-            delay(1500); showLocked();
-          }
-        }
-        break;
-      } else if (k == '*') { input = ""; showLocked(); break; }
-    }
-  }
-  else if (key == 'A') { changingPass = true; oldPassOk = false; input = ""; showPasswordEntry("CURRENT PASS:",""); }
-  else if (key == 'B') { regRFID = true; showText("Register RFID","Scan card now..."); }
-  else if (key == 'D') {
-    input = "";
-    showPasswordEntry("MASTER CODE:", "");
-    while (true) {
-      char k = keypad.getKey();
-      if (!k) { delay(10); continue; }
-      beep(50);
-      if (k >= '0' && k <= '9' && input.length() < 4) { input += k; showPasswordEntry("MASTER CODE:", stars()); }
-      else if (k == '#') {
-        if (input == masterCode) { fails = 0; lockedOut = false; input = ""; successBeep(); showText("Master OK!",""); delay(1500); unlockSafe(); }
-        else { input = ""; errorBeep(); showText("WRONG",""); delay(1500); showLocked(); }
-        break;
-      } else if (k == '*') { input = ""; showLocked(); break; }
-    }
-  }
+  handleBleCommand();
+  updateLockoutCountdown();
+  handleRfidRegistration();
+  handleRfidScan();
+  handleKeypad();
 }
