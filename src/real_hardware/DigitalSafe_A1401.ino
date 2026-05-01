@@ -155,6 +155,8 @@ class RxCB : public BLECharacteristicCallbacks {
 // ─────────────────────────────────────────────────────────────
 // Forward Declarations
 // ─────────────────────────────────────────────────────────────
+void beginScreen();
+void drawLockAnim(int offset, const char* label, int labelX);
 void bleSend(const String& msg);
 void beep(int ms);
 void successBeep();
@@ -218,6 +220,10 @@ void loop();
 // ─────────────────────────────────────────────────────────────
 // Generic Helpers
 // ─────────────────────────────────────────────────────────────
+void beginScreen() {
+  beginScreen();
+}
+
 void bleSend(const String& msg) {
   if (bleConnected && pTxChar) {
     pTxChar->setValue(msg.c_str());
@@ -268,7 +274,7 @@ void clearInput() {
 }
 
 bool isInputKey(char key) {
-  return (key >= '0' && key <= '9') || key == 'A' || key == 'B' || key == 'C' || key == 'D';
+  return (key >= '0' && key <= '9') || (key >= 'A' && key <= 'D');
 }
 
 char mapCharMode(char key) {
@@ -292,13 +298,8 @@ char mapCharMode(char key) {
 }
 
 unsigned long lockDurationForCycle(int cycleIndex) {
-  switch (cycleIndex % 4) {
-    case 0: return 30000UL;
-    case 1: return 60000UL;
-    case 2: return 120000UL;
-    case 3: return 240000UL;
-  }
-  return 30000UL;
+  static const unsigned long d[] = {30000UL, 60000UL, 120000UL, 240000UL};
+  return d[cycleIndex % 4];
 }
 
 unsigned long currentLockDurationMs() {
@@ -446,8 +447,7 @@ void drawLockIcon(int x, int y, bool locked) {
 }
 
 void showWelcomeScreen() {
-  display.clearDisplay();
-  display.drawRoundRect(2, 2, 124, 124, 6, SH110X_WHITE);
+  beginScreen();
   drawLockIcon(44, 12, true);
   display.setTextColor(SH110X_WHITE);
   display.setTextSize(1);
@@ -458,8 +458,7 @@ void showWelcomeScreen() {
 }
 
 void showLockedScreen() {
-  display.clearDisplay();
-  display.drawRoundRect(2, 2, 124, 124, 6, SH110X_WHITE);
+  beginScreen();
   drawLockIcon(44, 8, true);
 
   display.setTextSize(1);
@@ -476,8 +475,7 @@ void showLockedScreen() {
 }
 
 void showOpenScreen() {
-  display.clearDisplay();
-  display.drawRoundRect(2, 2, 124, 124, 6, SH110X_WHITE);
+  beginScreen();
   drawLockIcon(44, 8, false);
 
   display.setTextSize(2);
@@ -494,8 +492,7 @@ void showOpenScreen() {
 }
 
 void showPasswordEntry(const String& title) {
-  display.clearDisplay();
-  display.drawRoundRect(2, 2, 124, 124, 6, SH110X_WHITE);
+  beginScreen();
 
   display.setTextColor(SH110X_WHITE);
   display.setTextSize(1);
@@ -531,8 +528,7 @@ void showPasswordEntry(const String& title) {
 }
 
 void showLockoutScreen(unsigned long remainingSec) {
-  display.clearDisplay();
-  display.drawRoundRect(2, 2, 124, 124, 6, SH110X_WHITE);
+  beginScreen();
   display.setTextSize(2);
   display.setTextColor(SH110X_WHITE);
   display.setCursor(18, 20);
@@ -554,8 +550,7 @@ void showLockoutScreen(unsigned long remainingSec) {
 }
 
 void showMasterMenu() {
-  display.clearDisplay();
-  display.drawRoundRect(2, 2, 124, 124, 6, SH110X_WHITE);
+  beginScreen();
   display.setTextColor(SH110X_WHITE);
   display.setTextSize(1);
   display.setCursor(16, 16);
@@ -574,8 +569,7 @@ void showMasterMenu() {
 }
 
 void showBootResetHint() {
-  display.clearDisplay();
-  display.drawRoundRect(2, 2, 124, 124, 6, SH110X_WHITE);
+  beginScreen();
   display.setTextColor(SH110X_WHITE);
   display.setTextSize(1);
   display.setCursor(10, 22);
@@ -647,8 +641,7 @@ void animLoadingBar() {
 
 void animChecking(const String& msg) {
   for (int i = 0; i < 3; i++) {
-    display.clearDisplay();
-    display.drawRoundRect(2, 2, 124, 124, 6, SH110X_WHITE);
+    beginScreen();
     drawLockIcon(44, 10, true);
 
     display.setTextSize(1);
@@ -664,44 +657,28 @@ void animChecking(const String& msg) {
   }
 }
 
-void animUnlock() {
-  for (int offset = 0; offset <= 12; offset += 2) {
-    display.clearDisplay();
-    display.drawRoundRect(2, 2, 124, 124, 6, SH110X_WHITE);
-    display.fillRoundRect(44, 45, 40, 35, 5, SH110X_WHITE);
-    display.drawRoundRect(52 + offset / 2, 20 - offset, 24, 28, 10, SH110X_WHITE);
-    display.drawRoundRect(54 + offset / 2, 22 - offset, 20, 26, 8, SH110X_WHITE);
-    display.fillRect(53 + offset / 2, 42 - offset, 22, 10, SH110X_BLACK);
-    display.fillCircle(64, 58, 4, SH110X_BLACK);
-    display.fillRect(62, 62, 5, 7, SH110X_BLACK);
+void drawLockAnim(int offset, const char* label, int labelX) {
+  beginScreen();
+  display.fillRoundRect(44, 45, 40, 35, 5, SH110X_WHITE);
+  display.drawRoundRect(52 + offset / 2, 20 - offset, 24, 28, 10, SH110X_WHITE);
+  display.drawRoundRect(54 + offset / 2, 22 - offset, 20, 26,  8, SH110X_WHITE);
+  display.fillRect(53 + offset / 2, 42 - offset, 22, 10, SH110X_BLACK);
+  display.fillCircle(64, 58, 4, SH110X_BLACK);
+  display.fillRect(62, 62, 5, 7, SH110X_BLACK);
+  display.setTextSize(1);
+  display.setTextColor(SH110X_WHITE);
+  display.setCursor(labelX, 92);
+  display.println(label);
+  display.display();
+  delay(70);
+}
 
-    display.setTextSize(1);
-    display.setTextColor(SH110X_WHITE);
-    display.setCursor(26, 92);
-    display.println("OPENING...");
-    display.display();
-    delay(70);
-  }
+void animUnlock() {
+  for (int offset = 0;  offset <= 12; offset += 2) drawLockAnim(offset, "OPENING...", 26);
 }
 
 void animLock() {
-  for (int offset = 12; offset >= 0; offset -= 2) {
-    display.clearDisplay();
-    display.drawRoundRect(2, 2, 124, 124, 6, SH110X_WHITE);
-    display.fillRoundRect(44, 45, 40, 35, 5, SH110X_WHITE);
-    display.drawRoundRect(52 + offset / 2, 20 - offset, 24, 28, 10, SH110X_WHITE);
-    display.drawRoundRect(54 + offset / 2, 22 - offset, 20, 26, 8, SH110X_WHITE);
-    display.fillRect(53 + offset / 2, 42 - offset, 22, 10, SH110X_BLACK);
-    display.fillCircle(64, 58, 4, SH110X_BLACK);
-    display.fillRect(62, 62, 5, 7, SH110X_BLACK);
-
-    display.setTextSize(1);
-    display.setTextColor(SH110X_WHITE);
-    display.setCursor(30, 92);
-    display.println("LOCKING...");
-    display.display();
-    delay(70);
-  }
+  for (int offset = 12; offset >= 0;  offset -= 2) drawLockAnim(offset, "LOCKING...", 30);
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -749,8 +726,7 @@ void flashWrongFeedback() {
   digitalWrite(GREEN_LED, LOW);
   longErrorBeep();
 
-  display.clearDisplay();
-  display.drawRoundRect(2, 2, 124, 124, 6, SH110X_WHITE);
+  beginScreen();
   display.setTextSize(2);
   display.setTextColor(SH110X_WHITE);
   display.setCursor(18, 40);
@@ -800,8 +776,7 @@ void onFailedAccess() {
   if (fails >= MAX_FAILS) {
     startLockout();
   } else {
-    display.clearDisplay();
-    display.drawRoundRect(2, 2, 124, 124, 6, SH110X_WHITE);
+    beginScreen();
     display.setTextSize(2);
     display.setTextColor(SH110X_WHITE);
     display.setCursor(18, 34);
@@ -996,9 +971,7 @@ void handleBleCommand() {
   if (!newBleCmd) return;
   newBleCmd = false;
 
-  String cmd = bleCommand;
-  String cmdUpper = cmd;
-  cmdUpper.trim();
+  String cmdUpper = bleCommand;
   cmdUpper.toUpperCase();
 
   if (state == STATE_LOCKOUT) {
@@ -1007,7 +980,7 @@ void handleBleCommand() {
   }
 
   if (cmdUpper.startsWith("PASS:")) {
-    String p = cmd.substring(5);
+    String p = bleCommand.substring(5);
     p.trim();
     animChecking();
 
@@ -1030,7 +1003,7 @@ void handleBleCommand() {
     else if (state == STATE_LOCKOUT) bleSend("STATUS:LOCKED_OUT");
     else bleSend("STATUS:LOCKED");
   } else if (cmdUpper.startsWith("CHPASS:")) {
-    String p = cmd.substring(7);
+    String p = bleCommand.substring(7);
     p.trim();
 
     if (state != STATE_OPEN) {
@@ -1258,11 +1231,8 @@ void handleKeypad() {
     case STATE_REGISTER_RFID:
       if (key == '*') {
         clearInput();
-        if (!passwordConfigured) state = STATE_SETUP_PASSWORD;
-        else state = STATE_LOCKED;
-
-        if (state == STATE_SETUP_PASSWORD) showPasswordEntry("SET NEW PASS");
-        else showLockedScreen();
+        if (!passwordConfigured) { state = STATE_SETUP_PASSWORD; showPasswordEntry("SET NEW PASS"); }
+        else                     { state = STATE_LOCKED;         showLockedScreen(); }
       }
       break;
 
